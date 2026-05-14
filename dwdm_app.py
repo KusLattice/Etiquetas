@@ -32,11 +32,31 @@ class App(TkinterDnDCTk):
         self.grid_rowconfigure(4, weight=1)
         # Temas Disponibles
         self.themes = {
-            "Dark": {"bg": "#0a0a0a", "header": "#1a1a1a", "btn_acc": "#2c3e50", "btn_ok": "#27ae60", "text": "#e0e0e0", "accent": "#3498db", "font": "Inter"},
-            "Matrix": {"bg": "#000000", "header": "#000000", "btn_acc": "#003b00", "btn_ok": "#008f11", "text": "#00ff41", "accent": "#00ff41", "font": "Consolas"},
-            "El Trauco": {"bg": "#142114", "header": "#0a120a", "btn_acc": "#2d5a27", "btn_ok": "#3e7a3a", "text": "#d4e1d1", "accent": "#4a7c44", "font": "Georgia"},
-            "La Pincoya": {"bg": "#003d4d", "header": "#002b36", "btn_acc": "#007c91", "btn_ok": "#4db6ac", "text": "#e0f2f1", "accent": "#26c6da", "font": "Trebuchet MS"},
-            "El Caleuche": {"bg": "#0d1a1a", "header": "#050f0f", "btn_acc": "#1a4a4a", "btn_ok": "#26a69a", "text": "#a7ffeb", "accent": "#64ffda", "font": "Courier New"}
+            "Dark": {
+                "bg": "#0a0a0a", "header": "#1a1a1a", "btn_acc": "#2c3e50", "btn_ok": "#27ae60", 
+                "text": "#e0e0e0", "btn_text": "white", "accent": "#3498db", "font": "Inter",
+                "decor": "🖥️ 🛰️ 🏢 📶 💠"
+            },
+            "Matrix": {
+                "bg": "#000000", "header": "#000000", "btn_acc": "#003b00", "btn_ok": "#008f11", 
+                "text": "#00ff41", "btn_text": "#00ff41", "accent": "#00ff41", "font": "Consolas",
+                "decor": "0101 1010 0110 1101"
+            },
+            "El Trauco": {
+                "bg": "#142114", "header": "#0a120a", "btn_acc": "#2d5a27", "btn_ok": "#3e7a3a", 
+                "text": "#d4e1d1", "btn_text": "white", "accent": "#4a7c44", "font": "Georgia",
+                "decor": "🌲 🍄 👺 🌿 🪵"
+            },
+            "La Pincoya": {
+                "bg": "#003d4d", "header": "#002b36", "btn_acc": "#007c91", "btn_ok": "#4db6ac", 
+                "text": "#e0f2f1", "btn_text": "white", "accent": "#26c6da", "font": "Trebuchet MS",
+                "decor": "🧜‍♀️ 🐚 🌊 🏝️ 🐠"
+            },
+            "El Caleuche": {
+                "bg": "#0d1a1a", "header": "#050f0f", "btn_acc": "#1a4a4a", "btn_ok": "#26a69a", 
+                "text": "#a7ffeb", "btn_text": "black", "accent": "#64ffda", "font": "Courier New",
+                "decor": "🚢 👻 🌫️ ⚓ 🌑"
+            }
         }
         self.current_theme_name = "Dark"
 
@@ -50,7 +70,15 @@ class App(TkinterDnDCTk):
             text="Generador de Etiquetas",
             font=ctk.CTkFont(size=24, weight="bold")
         )
-        self.header_label.grid(row=0, column=0, padx=15, pady=(20, 20), sticky="w")
+        self.header_label.grid(row=0, column=0, padx=15, pady=(20, 5), sticky="w")
+
+        # Decoración temática
+        self.decor_label = ctk.CTkLabel(
+            self.header_frame,
+            text=self.themes[self.current_theme_name]["decor"],
+            font=ctk.CTkFont(size=18)
+        )
+        self.decor_label.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="w")
 
         # Configuración de Proyectos por Empresa
         self.projects_map = {
@@ -242,12 +270,15 @@ class App(TkinterDnDCTk):
             text="⚙️ Analizar y crear",
             fg_color=theme["btn_acc"], 
             hover_color=theme["accent"],
-            text_color=theme["text"]
+            text_color=theme["btn_text"]
         )
         self.btn_open_excel.configure(
             fg_color=theme["btn_ok"], 
-            text_color=theme["text"]
+            text_color=theme["btn_text"]
         )
+        
+        # Actualizar Decoración
+        self.decor_label.configure(text=theme["decor"], text_color=theme["text"])
         
         # Consola y detalles específicos
         if theme_name == "Matrix":
