@@ -38,12 +38,20 @@ BOARD_EXCEPTIONS = {
 
 # Sufijos que indican número de revisión y deben eliminarse
 _SUFFIX_RE = re.compile(r'(S\d+|0[01])$', re.IGNORECASE)
-# Prefijos a eliminar
-_PREFIX_RE = re.compile(r'^(TNG2|G2)', re.IGNORECASE)
+# Prefijos a eliminar (incluyendo posibles dígitos de rack/subrack al inicio en PDF)
+_PREFIX_RE = re.compile(r'^(\d+)?(TNG2|G2)', re.IGNORECASE)
 # M808SA: quitar sufijo Fxx y números de frecuencia
 _M808_RE   = re.compile(r'^M808SA', re.IGNORECASE)
 # P2ON32S: quitar 01 final
 _P2ON_RE   = re.compile(r'^P2ON32S', re.IGNORECASE)
+
+# Ruido técnico a eliminar de los puertos (PDF)
+_TECHNICAL_NOISE = [
+    r'\d+(\.\d+)?(G|M)?Hz',  # 75.0GHz, 50GHz, etc.
+    r'[-+]?\d+(\.\d+)?dBm?', # 0.5dBm, -10dBm, etc.
+    r'\(\d+_[A-Z]\d+\)',    # (1_C01), (2_B04) - PDF coordinate tags
+    r'^[A-Z]\d{1,2}(?=[A-Z])', # Prefix noise like 'G2' in 'G2WSMD9'
+]
 
 
 def normalize_board(raw: str) -> str:
@@ -159,7 +167,9 @@ _ANNOTATION_PATTERNS = [
     re.compile(r'proyectado|existente|software|reserva', re.IGNORECASE),
     re.compile(r'^(?:From|To)\s+[A-Z]', re.IGNORECASE),              # refs externas largas
     # Labels de leyenda / notas largas del diagrama
-    re.compile(r'(fiber|rack|board|connected|outside|legend|virtual|backplane|customer)', re.IGNORECASE),
+    re.compile(r'(fiber|rack|board|connected|outside|legend|virtual|backplane|customer|atenuator|fixed)', re.IGNORECASE),
+    re.compile(r'[RT]X_?\d{4,}', re.IGNORECASE),                      # Frecuencias con/sin underscore
+    re.compile(r'\d{4,}\s*(THz|nm)', re.IGNORECASE),                 # Wavelengths
 ]
 
 def is_annotation(text: str) -> bool:
@@ -188,7 +198,7 @@ _ODF_TO_RE = re.compile(
     re.IGNORECASE
 )
 # También el shape puede tener texto genérico tipo "ODF_MAIPU_VTR_B"
-_ODF_DIRECT_RE = re.compile(r'^ODF[_\s]', re.IGNORECASE)
+_ODF_DIRECT_RE = re.compile(r'^ODF(_|\s|$)', re.IGNORECASE)
 
 # Determinar si un extremo de línea NO tiene board pero llega a un label ODF
 def is_odf_label(text: str) -> bool:
@@ -298,13 +308,33 @@ def find_closest_label(x, y, page, labels, threshold=0.5):
 # Constructor de endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 def _clean_port(raw: str) -> str:
-    """Limpia el texto de puerto: quita ) sin par al final, preserva IN(P)."""
+    """Limpia el nombre del puerto de ruido técnico y anotaciones del PDF."""
     s = raw.strip()
+    
+    # 1. Quitar frecuencias/wavelengths y todo lo que sigue (ej: _1491_CISTERNA -> '')
+    # Buscamos patrones de 4 dígitos (típico de lambda/frecuencia)
+    s = re.sub(r'_?\d{4,}.*$', '', s)
+
+    # 2. Quitar ruido técnico específico
+    for pattern in _TECHNICAL_NOISE:
+        s = re.sub(pattern, '', s, flags=re.IGNORECASE)
+
+    # 3. Quitar sufijos comunes de anotación que ensucian el puerto
+    s = re.sub(r'_(FROM|TO|ATENUATOR|FIXED|LA|RM|TM|EI|AM|EO|DM).*$', '', s, flags=re.IGNORECASE)
+
+    # 4. Limpiar caracteres especiales al inicio/fin
+    s = s.strip('-_ ')
+    
+    # 5. Normalizar (P) y (W)
+    s = s.replace('(p)', '(P)').replace('(w)', '(W)')
+
+    # 6. Balancear paréntesis
     opens  = s.count('(')
     closes = s.count(')')
     if closes > opens:
         s = s[:-(closes - opens)]
-    return s.strip() or 'P'
+        
+    return s.strip().upper() or 'P'
 
 
 def build_endpoint(prefix: str, board_parsed: tuple, port_text: str, site: str) -> str:
@@ -488,7 +518,31 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                 to_ep = odf if odf.startswith('T:') else f"T:{odf}"
 
         if from_ep and to_ep:
-            raw_connections.append({'FROM:': from_ep, 'TO:': to_ep})
+            # Calcular posición promedio en X para ordenar de izquierda a derecha
+            avg_x = (line['bx'] + line['ex']) / 2
+            
+            # Intentar encontrar el "Equipo" (A, B, C) más cercano a la placa FROM
+            equipment_label = "SIN_EQUIPO"
+            if b_f:
+                # Buscar label tipo "Equipo X" o "Rack X" arriba del board
+                closest_eq = None
+                min_eq_dist = 5.0 # límite de búsqueda
+                for l in labels_all:
+                    if l['page'] == pg and ('EQUIPO' in l['text'].upper() or 'RACK' in l['text'].upper()):
+                        dist = ((l['x'] - b_f['x'])**2 + (l['y'] - b_f['y'])**2)**0.5
+                        if dist < min_eq_dist:
+                            min_eq_dist = dist
+                            closest_eq = l['text'].strip()
+                if closest_eq:
+                    equipment_label = closest_eq
+
+            raw_connections.append({
+                'FROM:': from_ep, 
+                'TO:': to_ep, 
+                'page': pg, 
+                'equipment': equipment_label,
+                'x': avg_x
+            })
 
     # Mostrar primeras 25 crudas
     print(f"\n[RAW] {len(raw_connections)} conexiones antes de filtros. Primeras 25:")
@@ -523,32 +577,51 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
     seen = set()
     unique = []
     for c in filtered:
+        # Usar tupla de FROM y TO para la unicidad
         key = (c['FROM:'], c['TO:'])
         if key not in seen:
             seen.add(key)
             unique.append(c)
 
-    # Mostrar primeras 25 finales
-    print(f"\n[FINAL] {len(unique)} conexiones únicas. Primeras 25:")
-    for i, c in enumerate(unique[:25], 1):
-        print(f"  {i:02d}. {c['FROM:']:50s} | {c['TO:']}")
+    # ── 6. Ordenar ─────────────────────────────────────────────────────────────
+    # Ordenar por Página, luego por Equipo, luego por X (izquierda a derecha)
+    unique.sort(key=lambda c: (c['page'], c['equipment'], c['x']))
 
-    return unique
+    # Limpiar campos auxiliares para el Excel final (pero mantener equipo para el agrupador)
+    final_list = []
+    for c in unique:
+        final_list.append({'FROM:': c['FROM:'], 'TO:': c['TO:'], '_eq': c['equipment']})
+
+    return final_list
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Generación de Excel
 # ─────────────────────────────────────────────────────────────────────────────
 def generate_excel(connections: list, output_path: str) -> int:
-    """Guarda las conexiones en Excel. Retorna el número de filas."""
+    """Guarda las conexiones en Excel con separadores de equipo."""
     if not connections:
         print("[WARN] Sin conexiones para guardar.")
         return 0
-    df = pd.DataFrame(connections, columns=['FROM:', 'TO:'])
-    df.drop_duplicates(inplace=True)
+    
+    rows = []
+    current_eq = None
+    
+    for c in connections:
+        eq = c.get('_eq', 'SIN_EQUIPO')
+        if eq != current_eq:
+            # Insertar fila de cabecera de equipo (como en la captura 2)
+            rows.append({'FROM:': eq, 'TO:': ''})
+            current_eq = eq
+        rows.append({'FROM:': c['FROM:'], 'TO:': c['TO:']})
+
+    df = pd.DataFrame(rows, columns=['FROM:', 'TO:'])
+    # NO deduplicar aquí para no borrar los headers
+    
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
+    
     df.to_excel(output_path, index=False)
     print(f"[OK] Excel guardado: {output_path} ({len(df)} filas)")
     return len(df)
