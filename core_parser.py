@@ -1,56 +1,98 @@
+"""
+core_parser.py — Parser DWDM Huawei para diagramas Visio (.vsdx)
+Genera Excel con columnas FROM: y TO: para impresora Brother P-touch.
+
+Arquitectura:
+  - Shapes clasificados en 3 tipos: boards (h>>w), labels (pequeños), lines (BeginX/EndX)
+  - Proximidad boards: overlap en Y + distancia X mínima  (lógica scratch.py)
+  - Proximidad labels: distancia Euclidiana con threshold ajustable
+  - Normalización completa de placas, sitio, subrack/slot y puertos
+"""
+
 import zipfile
 import xml.etree.ElementTree as ET
 import pandas as pd
 import re
 import os
 
-# ─── Namespace Visio ────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Namespace Visio
+# ─────────────────────────────────────────────────────────────────────────────
 NS = {'v': 'http://schemas.microsoft.com/office/visio/2012/main'}
 
-# ─── Normalización de Nombres de Placa ──────────────────────────────────────
-# Reglas: quitar prefijos G2/TNG2, quitar sufijos S+digits / 01 / 00 al final
-# Ej: G2WSMD901→WSMD9, G2DAP→DAP, G2DWSS2001→DWSS20, M808SAF3→M808SA, OPM8→OPM8
-BOARD_STRIP_PREFIX = re.compile(r'^(?:TNG2|G2)', re.IGNORECASE)
-# Sufijo a eliminar: solo "01" o "00" al final (revision digits)
-# NO eliminamos S+digits si queda parte del nombre (ej: DWSS20 tiene S20 que es parte del nombre)
-# Regla: eliminar solo si son exactamente 2 dígitos "00" o "01" al final
-BOARD_STRIP_SUFFIX = re.compile(r'(?:S\d+|0[01])$', re.IGNORECASE)
-
-# Nombres conocidos que NO deben perder su sufijo (excepción a la regla)
-BOARD_KNOWN_EXCEPTIONS = {
+# ─────────────────────────────────────────────────────────────────────────────
+# Tabla de normalización de placas (excepciones explícitas primero)
+# ─────────────────────────────────────────────────────────────────────────────
+BOARD_EXCEPTIONS = {
     'DWSS2001': 'DWSS20',
+    'DWSS20':   'DWSS20',
     'OH9S01':   'OH9S',
+    'OH9S':     'OH9S',
     'WSMD901':  'WSMD9',
-    'M808SAF3': 'M808SA',
+    'WSMD9':    'WSMD9',
+    'OHN801':   'OHN8',
+    'OHN8':     'OHN8',
+    'OPM8':     'OPM8',
+    'DAP':      'DAP',
 }
 
+# Sufijos que indican número de revisión y deben eliminarse
+_SUFFIX_RE = re.compile(r'(S\d+|0[01])$', re.IGNORECASE)
+# Prefijos a eliminar
+_PREFIX_RE = re.compile(r'^(TNG2|G2)', re.IGNORECASE)
+# M808SA: quitar sufijo Fxx y números de frecuencia
+_M808_RE   = re.compile(r'^M808SA', re.IGNORECASE)
+# P2ON32S: quitar 01 final
+_P2ON_RE   = re.compile(r'^P2ON32S', re.IGNORECASE)
+
+
 def normalize_board(raw: str) -> str:
-    """Normaliza el nombre de una placa DWDM Huawei."""
+    """Normaliza el nombre de una placa Huawei DWDM."""
     s = raw.strip().upper()
-    s = BOARD_STRIP_PREFIX.sub('', s)
-    # Verificar excepciones conocidas primero
-    if s in BOARD_KNOWN_EXCEPTIONS:
-        return BOARD_KNOWN_EXCEPTIONS[s]
-    # Regla general: quitar sufijo de revision solo si son 2 digits exactos (00/01)
-    s = re.sub(r'0[01]$', '', s)
-    return s
+    s = _PREFIX_RE.sub('', s)          # quitar G2 / TNG2
 
-# ─── Normalización de Sitio ──────────────────────────────────────────────────
-# "MAIPU VTR" → "MAIP_VTR" (4 chars primer token + _ + operadora)
-def normalize_site(raw: str) -> str:
-    """Devuelve XXXX_OPE a partir de un string de sitio libre."""
-    raw = raw.strip().upper()
-    # Eliminar prefijos RD_ si ya están
-    raw = re.sub(r'^RD_', '', raw)
-    parts = re.split(r'[\s_]+', raw)
-    if len(parts) >= 2:
-        site_part = parts[0][:4]
-        ope_part  = parts[1]
-        return f"{site_part}_{ope_part}"
-    return parts[0][:8]  # fallback
+    # Excepciones directas (antes de quitar sufijos)
+    if s in BOARD_EXCEPTIONS:
+        return BOARD_EXCEPTIONS[s]
 
-# ─── Helpers de Geometría ───────────────────────────────────────────────────
-def _get_float(shape, cell_name, default=0.0):
+    # M808SAFxx → M808SA
+    if _M808_RE.match(s):
+        return 'M808SA'
+
+    # P2ON32Sxx → P2ON32S
+    if _P2ON_RE.match(s):
+        return 'P2ON32S'
+
+    # Regla general: quitar sufijo de revisión (S01, 01, 00)
+    s = _SUFFIX_RE.sub('', s)
+
+    # Segunda pasada de excepciones (post-strip)
+    return BOARD_EXCEPTIONS.get(s, s)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Normalización de sitio
+# ─────────────────────────────────────────────────────────────────────────────
+def normalize_site(city: str, ope: str) -> str:
+    """'MAIPU', 'VTR' → 'MAIP_VTR'"""
+    return f"{city.strip()[:4].upper()}_{ope.strip().upper()}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Extracción de texto Visio (chars fragmentados → string limpio)
+# ─────────────────────────────────────────────────────────────────────────────
+def get_text(shape) -> str:
+    """Extrae el texto completo de un shape, colapsando fragmentación char-a-char."""
+    elem = shape.find('.//v:Text', NS)
+    if elem is None:
+        return ''
+    raw = ''.join(elem.itertext())
+    # Quitar whitespace entre caracteres individuales (artefacto de formateo Visio)
+    cleaned = re.sub(r'(?<=\S)\s+(?=\S)', '', raw)
+    return cleaned.strip()
+
+
+def get_num(shape, cell_name, default=0.0):
     cell = shape.find(f'.//v:Cell[@N="{cell_name}"]', NS)
     if cell is not None:
         try:
@@ -59,342 +101,454 @@ def _get_float(shape, cell_name, default=0.0):
             pass
     return default
 
-def _get_text(shape):
-    elem = shape.find('.//v:Text', NS)
-    if elem is None:
-        return ''
-    # Visio puede fragmentar texto caracter a caracter con nodos cp/pp.
-    # itertext() los concatena todos; limpiamos espacios y saltos internos.
-    raw = ''.join(elem.itertext())
-    # Colapsar cualquier secuencia de whitespace a nada (el texto real no tiene espacios)
-    # pero preservar el espacio antes del bloque de slot "(1_B04)"
-    # Estrategia: quitar \n y espacios aislados entre letras/dígitos individuales
-    cleaned = re.sub(r'(?<=\S)\s+(?=\S)', '', raw)  # quitar whitespace entre chars
-    return cleaned.strip()
 
-# ─── Clasificación de Shapes ─────────────────────────────────────────────────
-# En diagramas DWDM Huawei:
-#   BOARD  → shape vertical, height >> width, tiene el nombre de placa + subrack/slot
-#   LABEL  → shape pequeño, tiene el nombre de puerto (VI_2, OUT, IN(P), etc.)
-#   LINE   → tiene BeginX/EndX, es el conector físico
-#   ODF    → shape con texto "ODF" o patrón "From/To Site_Board"
+def get_num_or_none(shape, cell_name):
+    cell = shape.find(f'.//v:Cell[@N="{cell_name}"]', NS)
+    if cell is not None:
+        try:
+            return float(cell.attrib.get('V', 0))
+        except (ValueError, TypeError):
+            pass
+    return None
 
-BOARD_ASPECT_RATIO = 2.0   # h/w mínimo para ser considerado board
 
-def classify_shapes(root):
-    """Separa shapes en boards, labels y lines."""
-    boards = []
-    labels = []
-    lines  = []
+# ─────────────────────────────────────────────────────────────────────────────
+# Parseo de texto de board → (board_norm, rack, subrack, slot)
+# ─────────────────────────────────────────────────────────────────────────────
+# Formato en Visio (tras colapsar whitespace): "G2WSMD901(1_B04)" o "OPM8(1_B06)"
+# Pattern: BOARDNAME(RACK_SUBRACKSLOT)   donde SUBRACK es letra, SLOT son dígitos
+_BOARD_PARSE_RE = re.compile(
+    r'^([A-Z0-9]+)'        # nombre de placa (con prefijo G2, etc.)
+    r'\((\d+)'             # (rack número
+    r'[_\-]'
+    r'([A-Za-z])'          # subrack letra (A, B, C...)
+    r'(\d+)\)',            # slot número)
+    re.IGNORECASE
+)
 
-    for shape in root.findall('.//v:Shape', NS):
-        sid  = shape.get('ID', '')
-        text = _get_text(shape)
-        pinx = _get_float(shape, 'PinX')
-        piny = _get_float(shape, 'PinY')
-        w    = _get_float(shape, 'Width')
-        h    = _get_float(shape, 'Height')
-        bx   = _get_float(shape, 'BeginX', None)
 
-        # ─ Línea / conector
-        bx_elem = shape.find('./v:Cell[@N="BeginX"]', NS)
-        if bx_elem is not None:
-            bx = float(bx_elem.attrib.get('V', 0))
-            by = _get_float(shape, 'BeginY')
-            ex = _get_float(shape, 'EndX')
-            ey = _get_float(shape, 'EndY')
-            lines.append({'id': sid, 'bx': bx, 'by': by, 'ex': ex, 'ey': ey})
-            continue
+def parse_board_shape(text: str):
+    """
+    Parsea el texto compacto de un shape de board.
+    Retorna (board_norm, rack_str, subrack_str, slot_zfill2) o None.
+    Ej: 'G2WSMD901(1_B04)' → ('WSMD9', '1', 'B', '04')
+    """
+    m = _BOARD_PARSE_RE.match(text.strip().upper())
+    if m:
+        board_raw, rack, subrack, slot_raw = m.groups()
+        return (
+            normalize_board(board_raw),
+            rack,
+            subrack.upper(),
+            str(int(slot_raw)).zfill(2)
+        )
+    return None
 
-        # ─ Board vs Label por geometría
-        if text:
-            if h > BOARD_ASPECT_RATIO * max(w, 0.001):
-                boards.append({'id': sid, 'x': pinx, 'y': piny, 'w': w, 'h': h, 'text': text})
-            else:
-                labels.append({'id': sid, 'x': pinx, 'y': piny, 'w': w, 'h': h, 'text': text})
 
-    return boards, labels, lines
-
-# Labels que deben ser ignorados como puertos (son anotaciones externas)
-LABEL_BLACKLIST_PATTERNS = [
-    re.compile(r'^(?:From|To)\s*[A-Z]', re.IGNORECASE),  # "From LACISTERNA..." / "To Maipu..."
-    re.compile(r'^\d+\.\d+dBm$', re.IGNORECASE),          # "0.5dBm"
-    re.compile(r'^\d+$'),                                   # solo dígitos
-    re.compile(r'v\d', re.IGNORECASE),                      # versiones
+# ─────────────────────────────────────────────────────────────────────────────
+# Filtros de labels de anotación (no son puertos)
+# ─────────────────────────────────────────────────────────────────────────────
+_ANNOTATION_PATTERNS = [
+    re.compile(r'^\d+(\.\d+)?\s*(dBm|THz|km|dB)$', re.IGNORECASE),  # valores físicos
+    re.compile(r'^\d+km[\-\s]?v\d', re.IGNORECASE),                   # '150km-V3.1'
+    re.compile(r'^v\d', re.IGNORECASE),                                # versiones Vx.x
+    re.compile(r'^\d+$'),                                              # solo dígitos
+    re.compile(r'^(APD|PIN)$', re.IGNORECASE),                        # detectores
+    re.compile(r'^[RT]X\d{4,}$', re.IGNORECASE),                     # frecuencias RX21491, TX11511
+    re.compile(r'150\s*km', re.IGNORECASE),
+    re.compile(r'proyectado|existente|software|reserva', re.IGNORECASE),
+    re.compile(r'^(?:From|To)\s+[A-Z]', re.IGNORECASE),              # refs externas largas
+    # Labels de leyenda / notas largas del diagrama
+    re.compile(r'(fiber|rack|board|connected|outside|legend|virtual|backplane|customer)', re.IGNORECASE),
 ]
 
-def is_annotation_label(text: str) -> bool:
-    """True si el texto parece una anotación técnica, no un nombre de puerto."""
-    if not text or len(text) < 1:
+def is_annotation(text: str) -> bool:
+    """True si el texto es una anotación técnica, no un nombre de puerto."""
+    if not text or len(text.strip()) < 1:
         return True
-    # Labels muy largos son referencias externas, no puertos
-    if len(text) > 20:
+    t = text.strip()
+    # Strings muy largos NO son puertos (pero podrían ser ODF — se evalúan antes)
+    if len(t) > 25 and not is_odf_label(t):
         return True
-    for pat in LABEL_BLACKLIST_PATTERNS:
-        if pat.match(text):
+    for pat in _ANNOTATION_PATTERNS:
+        if pat.search(t):
             return True
     return False
 
-def find_closest_board(x, y, boards, y_tolerance=0.6, x_threshold=3.0):
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detección de labels ODF / conexiones externas
+# ─────────────────────────────────────────────────────────────────────────────
+_ODF_FROM_RE = re.compile(
+    r'From\s+([A-Za-z0-9\s]+?)\s*_\s*[A-Z0-9]+\([^)]+\)_L(?:OUT|IN)',
+    re.IGNORECASE
+)
+_ODF_TO_RE = re.compile(
+    r'To\s+([A-Za-z0-9\s]+?)\s*_\s*[A-Z0-9]+\([^)]+\)_L(?:OUT|IN)',
+    re.IGNORECASE
+)
+# También el shape puede tener texto genérico tipo "ODF_MAIPU_VTR_B"
+_ODF_DIRECT_RE = re.compile(r'^ODF[_\s]', re.IGNORECASE)
+
+# Determinar si un extremo de línea NO tiene board pero llega a un label ODF
+def is_odf_label(text: str) -> bool:
+    t = text.strip()
+    return bool(
+        _ODF_FROM_RE.search(t) or
+        _ODF_TO_RE.search(t)   or
+        _ODF_DIRECT_RE.match(t)
+    )
+
+
+def extract_odf_name(text: str, local_site: str) -> str:
     """
-    Encuentra el board cuya franja vertical abarca Y (con tolerancia)
-    y está más cercano en X.
+    Extrae el nombre ODF de un label de conexión externa.
+    'From MAIPU VTR_G2OH9S01(1_A12)_LOUT (MAIPU VTR...)' → 'ODF_MAIPU_VTR_B'
+
+    Cuando el texto contiene 'From [SITIO]...' significa que la fibra viene de ese
+    sitio externo → el endpoint ODF en el diagrama local es el "lado B" del ODF.
+    Por convención usamos el nombre de sitio local + sufijo del cable.
     """
-    best     = None
-    min_dist = x_threshold
+    t = text.strip()
+
+    # Caso directo: "ODF_MAIPU_VTR_B"
+    if _ODF_DIRECT_RE.match(t):
+        return t.upper().replace(' ', '_')
+
+    # Extraer sitio del "From ..." o "To ..."
+    m = _ODF_FROM_RE.search(t) or _ODF_TO_RE.search(t)
+    if m:
+        site_raw = m.group(1).strip()
+        # "MAIPU VTR" → "MAIPU_VTR"
+        site_clean = re.sub(r'\s+', '_', site_raw).upper()
+        return f"ODF_{site_clean}_B"
+
+    # Fallback
+    return f"ODF_{local_site.replace(' ', '_').upper()}_B"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detección de sitio en la página
+# ─────────────────────────────────────────────────────────────────────────────
+_SITE_PATTERNS = [
+    # "MAIPU VTR" (con espacio)
+    re.compile(r'\b([A-Z]{3,8})\s+(VTR|MOVISTAR|WOM|ENTEL|CLARO|FON)\b', re.IGNORECASE),
+    # "MAIPUVTR" (colapsado, sin espacio)
+    re.compile(r'\b([A-Z]{3,8})(VTR|MOVISTAR|WOM|ENTEL|CLARO|FON)\b', re.IGNORECASE),
+    # "From MAIPU VTR_..." en labels ODF
+    re.compile(r'(?:From|To)\s+([A-Z]{3,8})\s*(VTR|MOVISTAR|WOM|ENTEL|CLARO|FON)', re.IGNORECASE),
+]
+_SITE_BLACKLIST = {'OPM', 'G2OH', 'G2DAP', 'G2WS', 'FON'}
+
+
+def detect_site(labels: list, boards: list) -> str:
+    """Detecta (city, ope) del sitio local; prioriza VTR sobre FON."""
+    hits = []
+    candidates = [l['text'] for l in labels] + [b['text'] for b in boards]
+    for text in candidates:
+        tu = text.upper()
+        for pat in _SITE_PATTERNS:
+            m = pat.search(tu)
+            if m:
+                city, ope = m.group(1).upper(), m.group(2).upper()
+                if city not in _SITE_BLACKLIST:
+                    hits.append((city, ope))
+    if not hits:
+        return 'SITE_UNK'
+    # Priorizar VTR
+    vtr = [(c, o) for c, o in hits if o == 'VTR']
+    city, ope = vtr[0] if vtr else hits[0]
+    return normalize_site(city, ope)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Funciones de proximidad geométrica
+# ─────────────────────────────────────────────────────────────────────────────
+def find_closest_board(x, y, page, boards, y_tolerance=0.5, x_limit=3.0):
+    """
+    Encuentra el board que contenga el punto Y (con tolerancia) y sea más cercano en X.
+    Basado en scratch.py — overlap vertical + distancia horizontal.
+    """
+    best, min_dist = None, x_limit
     for b in boards:
-        half_h = b['h'] / 2 + y_tolerance
-        if abs(b['y'] - y) <= half_h:
+        if b['page'] != page:
+            continue
+        if abs(b['y'] - y) <= b['h'] / 2 + y_tolerance:
             dist = abs(b['x'] - x)
             if dist < min_dist:
                 min_dist = dist
                 best = b
     return best
 
-def find_closest_label(x, y, labels, threshold=0.6):
-    """Encuentra el label más cercano a un punto dado."""
-    best     = None
-    min_dist = threshold
+
+def find_closest_label(x, y, page, labels, threshold=0.5):
+    """Distancia Euclidiana. Retorna None si ninguno está dentro del threshold."""
+    best, min_dist = None, float('inf')
     for l in labels:
+        if l['page'] != page:
+            continue
         dist = ((l['x'] - x) ** 2 + (l['y'] - y) ** 2) ** 0.5
         if dist < min_dist:
             min_dist = dist
             best = l
-    return best
+    return best if min_dist < threshold else None
 
-def find_odf_label(x, y, labels, threshold=1.5):
-    """
-    Versión más permisiva para encontrar labels ODF/externos
-    que pueden estar más alejados.
-    """
-    return find_closest_label(x, y, labels, threshold=threshold)
 
-# ─── Parser de Texto de Board ────────────────────────────────────────────────
-# Formato Huawei en boards: "G2WSMD901\n1B_04" o "G2DAP\n1B_01"
-# Subrack = primer token alfanumérico del segundo bloque (ej: "1B")
-# Slot     = número final del segundo bloque (ej: "04")
-# Formato real en el Visio: "G2WSMD901(1_B04)" o "G2DAP(1_B01)(1_TNG2OACU25S(T)2"
-# El PRIMER grupo de paréntesis es el subrack/slot: (SUBRACK_SLOT)
-# SUBRACK = número + letra (ej: 1B, 2A) o número solo (ej: 12)
-# SLOT    = número de 2 dígitos
-BOARD_TEXT_PATTERN = re.compile(
-    r'^([A-Z0-9]+)'           # board_raw al inicio (G2WSMD901, G2DAP, OPM8...)
-    r'\((\d+[A-Z]?)'          # (subrack: 1B, 2A, 1...
-    r'[_\-]'
-    r'([A-Z]?\d+)\)',         # slot: B04, 12, 01 con letra opcional
-    re.IGNORECASE
-)
-
-def parse_board_text(text: str):
-    """
-    Parsea el texto compacto de un shape de board Huawei.
-    Formato esperado tras clean: "G2WSMD901(1_B04)" o "OPM8(1_B06)"
-    Retorna (board_norm, subrack_str, slot_zfill2) o None.
-    """
-    clean = text.strip().upper()
-    m = BOARD_TEXT_PATTERN.match(clean)
-    if m:
-        board_raw, sub_prefix, slot_raw = m.groups()
-        board_norm = normalize_board(board_raw)
-        # subrack = sub_prefix + letra del slot si aplica
-        # Ej: sub_prefix="1", slot_raw="B04" → subrack="1B", slot="04"
-        slot_letter_match = re.match(r'^([A-Z])(\d+)$', slot_raw, re.IGNORECASE)
-        if slot_letter_match:
-            letter, num = slot_letter_match.groups()
-            subrack = f"{sub_prefix}{letter}"
-            slot_str = str(int(num)).zfill(2)
-        else:
-            # slot_raw es solo dígitos: ej "04"
-            subrack  = sub_prefix
-            slot_str = str(int(slot_raw)).zfill(2)
-        return board_norm, subrack, slot_str
-    return None
-
-# ─── Detección de ODF ────────────────────────────────────────────────────────
-ODF_PATTERN = re.compile(r'ODF|FROM\s+|TO\s+', re.IGNORECASE)
-
-def is_odf_shape(text: str) -> bool:
-    return bool(ODF_PATTERN.search(text))
-
-def format_odf_endpoint(prefix: str, text: str, site_norm: str) -> str:
-    """
-    Formatea un endpoint ODF externo.
-    Ej: "From MAIPU_VTR_B" → "F:ODF_MAIPU_VTR_B"
-    """
-    # Intentar extraer el sufijo del ODF
-    m = re.search(r'(?:ODF|from|to)\s*[_\s]*([\w\s]+)', text, re.IGNORECASE)
-    if m:
-        suffix = m.group(1).strip().replace(' ', '_').upper()
-        return f"{prefix}ODF_{suffix}"
-    # Fallback: usar el sitio
-    site_upper = site_norm.upper().replace('_', '_')
-    return f"{prefix}ODF_{site_upper}"
-
-# ─── Formateador de Endpoint ──────────────────────────────────────────────────
-def _clean_port(port: str) -> str:
-    """Elimina solo los paréntesis de cierre sin par al final del puerto.
-    Preserva puertos como IN(P) y OUT(P) intactos."""
-    if not port:
-        return 'P'
-    # Contar paréntesis: si hay más ')' que '(' al final, quitarlos
-    opens  = port.count('(')
-    closes = port.count(')')
+# ─────────────────────────────────────────────────────────────────────────────
+# Constructor de endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+def _clean_port(raw: str) -> str:
+    """Limpia el texto de puerto: quita ) sin par al final, preserva IN(P)."""
+    s = raw.strip()
+    opens  = s.count('(')
+    closes = s.count(')')
     if closes > opens:
-        port = port[:-(closes - opens)]
-    return port.strip() or 'P'
+        s = s[:-(closes - opens)]
+    return s.strip() or 'P'
 
-def format_endpoint(prefix: str, board_info: tuple, port_text: str, site_norm: str) -> str:
+
+def build_endpoint(prefix: str, board_parsed: tuple, port_text: str, site: str) -> str:
     """
-    Construye el endpoint final.
-    board_info = (board_norm, subrack, slot)
-    Ej: F:RD_MAIP_VTR_1B(04)-WSMD9-OUT
+    Construye: F:RD_MAIP_VTR_1B(04)-WSMD9-OUT
+    board_parsed = (board_norm, rack, subrack, slot)
     """
-    board_norm, subrack, slot = board_info
-    port = _clean_port(port_text)
-    return f"{prefix}RD_{site_norm}_{subrack}({slot})-{board_norm}-{port}"
+    board_norm, rack, subrack, slot = board_parsed
+    port = _clean_port(port_text) if port_text else 'P'
+    return f"{prefix}RD_{site}_{rack}{subrack}({slot})-{board_norm}-{port}"
 
-# ─── Detección de Sitio ───────────────────────────────────────────────────────
-# En los diagramas Huawei, el sitio suele aparecer en labels grandes.
-# El texto puede estar colapsado (sin espacios) o con espacios:
-# "MAIPU VTR", "MAIPUVTR", "From MAIPU VTR_..."
-SITE_PATTERNS = [
-    # Con espacio: "MAIPU VTR"
-    re.compile(r'\b([A-Z]{3,8})\s+(VTR|MOVISTAR|WOM|ENTEL|CLARO|FON)\b', re.IGNORECASE),
-    # Sin espacio: "MAIPUVTR", "LACISTERNAVTR" (colapsado)
-    re.compile(r'\b([A-Z]{3,8})(VTR|MOVISTAR|WOM|ENTEL|CLARO|FON)\b', re.IGNORECASE),
-    # En labels tipo "From MAIPU VTR_Board..."
-    re.compile(r'(?:From|To)\s*([A-Z]{3,8})\s*(VTR|MOVISTAR|WOM|ENTEL|CLARO|FON)', re.IGNORECASE),
-]
+def find_closest_odf_label(x, y, page, labels, threshold=0.6):
+    """Búsqueda de labels ODF con radio mayor (los ODF suelen estar alejados del extremo)."""
+    best, min_dist = None, float('inf')
+    for l in labels:
+        if l['page'] != page:
+            continue
+        if not is_odf_label(l['text']):
+            continue
+        dist = ((l['x'] - x) ** 2 + (l['y'] - y) ** 2) ** 0.5
+        if dist < min_dist:
+            min_dist = dist
+            best = l
+    return best if min_dist < threshold else None
 
-def detect_site(labels: list, boards: list) -> str:
-    """Detecta el nombre del sitio a partir de los textos del diagrama.
-    Prioriza VTR > FON > otros si hay múltiples coincidencias."""
-    candidates = [l['text'] for l in labels] + [b['text'] for b in boards]
-    results = []
-    for text in candidates:
-        text_up = text.upper()
-        for pattern in SITE_PATTERNS:
-            m = pattern.search(text_up)
-            if m:
-                city, ope = m.groups()
-                if city.upper() in ('OPM', 'G2OH', 'G2DAP', 'G2WS'):
-                    continue
-                results.append(normalize_site(f"{city} {ope}"))
-    if not results:
-        return "SITE_UNK"
-    # Priorizar resultados que contienen VTR sobre FON
-    vtr_hits = [r for r in results if 'VTR' in r]
-    if vtr_hits:
-        return vtr_hits[0]
-    return results[0]
-
-# ─── Motor Principal ──────────────────────────────────────────────────────────
-def parse_vsdx_connections(file_path: str, telco_name: str = "ClaroVTR") -> list:
+# ─────────────────────────────────────────────────────────────────────────────
+def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
+                           label_threshold: float = 0.8) -> list:
     """
-    Parsea un archivo VSDX de diagrama DWDM Huawei y retorna lista de conexiones.
-    Cada conexión es un dict {'FROM:': str, 'TO:': str}.
+    Parsea un VSDX Huawei y retorna lista de dicts {'FROM:': str, 'TO:': str}.
     """
-    extracted = []
+    boards_all = []
+    labels_all = []
+    lines_all  = []
 
+    # ── 1. Leer y clasificar todos los shapes ─────────────────────────────────
     try:
         with zipfile.ZipFile(file_path, 'r') as z:
             pages = sorted([
                 f for f in z.namelist()
-                if re.match(r'visio/pages/page\d+\.xml$', f)
+                if 'visio/pages/page' in f and f.endswith('.xml') and 'rels' not in f
             ])
 
-            print(f"[INFO] Páginas encontradas: {len(pages)}")
+            print(f"[INFO] {len(pages)} páginas encontradas en {os.path.basename(file_path)}")
 
-            for page_path in pages:
-                with z.open(page_path) as f:
-                    root = ET.fromstring(f.read())
+            for page_name in pages:
+                root = ET.fromstring(z.read(page_name))
+                page_boards, page_labels, page_lines = 0, 0, 0
 
-                boards, labels, lines = classify_shapes(root)
+                for shape in root.findall('.//v:Shape', NS):
+                    text = get_text(shape)
+                    pinx = get_num(shape, 'PinX')
+                    piny = get_num(shape, 'PinY')
+                    w    = get_num(shape, 'Width')
+                    h    = get_num(shape, 'Height')
+                    bx   = get_num_or_none(shape, 'BeginX')
+                    ex   = get_num_or_none(shape, 'EndX')
 
-                print(f"  [{page_path}] Boards={len(boards)}, Labels={len(labels)}, Lines={len(lines)}")
+                    if bx is not None and ex is not None:
+                        # Es una línea/conector
+                        by = get_num(shape, 'BeginY')
+                        ey = get_num(shape, 'EndY')
+                        lines_all.append({
+                            'bx': bx, 'by': by, 'ex': ex, 'ey': ey,
+                            'page': page_name
+                        })
+                        page_lines += 1
 
-                if not lines:
-                    print(f"  [{page_path}] Sin líneas, saltando.")
-                    continue
+                    elif h > 0.4 and h > w * 1.5 and text:
+                        # Board: shape vertical (h significativamente mayor que w)
+                        # Incluye boards grandes (WSMD9, DAP ~h=5.4) y pequeños (OPM8 ~h=0.6)
+                        boards_all.append({
+                            'x': pinx, 'y': piny, 'w': w, 'h': h,
+                            'text': text, 'page': page_name
+                        })
+                        page_boards += 1
 
-                # Detectar sitio en esta página
-                site_norm = detect_site(labels, boards)
-                print(f"  [{page_path}] Sitio detectado: {site_norm}")
+                    elif text:
+                        # Label: cualquier otro shape con texto
+                        labels_all.append({
+                            'x': pinx, 'y': piny,
+                            'text': text, 'page': page_name
+                        })
+                        page_labels += 1
 
-                # Debug: primeros 5 boards y labels
-                for b in boards[:5]:
-                    print(f"    BOARD: '{b['text'][:40]}' @ ({b['x']:.2f}, {b['y']:.2f}) W={b['w']:.2f} H={b['h']:.2f}")
-                for l in labels[:5]:
-                    print(f"    LABEL: '{l['text'][:40]}' @ ({l['x']:.2f}, {l['y']:.2f})")
-
-                for line in lines:
-                    # ── Extremo FROM (Begin) ──
-                    f_board = find_closest_board(line['bx'], line['by'], boards)
-                    f_label = find_closest_label(line['bx'], line['by'], labels)
-
-                    # ── Extremo TO (End) ──
-                    t_board = find_closest_board(line['ex'], line['ey'], boards)
-                    t_label = find_closest_label(line['ex'], line['ey'], labels)
-
-                    f_info = parse_board_text(f_board['text']) if f_board else None
-                    t_info = parse_board_text(t_board['text']) if t_board else None
-
-                    # FILTRO loopback: ignorar solo si board+subrack+slot+puerto son iguales
-                    f_port_txt = f_label['text'] if f_label and not is_annotation_label(f_label['text']) else ''
-                    t_port_txt = t_label['text'] if t_label and not is_annotation_label(t_label['text']) else ''
-                    if f_info and t_info and f_info == t_info and f_port_txt == t_port_txt:
-                        continue
-
-                    # ── Resolución de endpoint FROM ──
-                    from_ep = None
-                    if f_board:
-                        parsed = parse_board_text(f_board['text'])
-                        if parsed:
-                            from_ep = format_endpoint("F:", parsed, f_port_txt, site_norm)
-                    elif f_label and is_odf_shape(f_label['text']):
-                        from_ep = format_odf_endpoint("F:", f_label['text'], site_norm)
-
-                    # ── Resolución de endpoint TO ──
-                    to_ep = None
-                    if t_board:
-                        parsed = parse_board_text(t_board['text'])
-                        if parsed:
-                            to_ep = format_endpoint("T:", parsed, t_port_txt, site_norm)
-                    elif t_label and is_odf_shape(t_label['text']):
-                        to_ep = format_odf_endpoint("T:", t_label['text'], site_norm)
-
-                    if from_ep and to_ep and from_ep != to_ep:
-                        extracted.append({'FROM:': from_ep, 'TO:': to_ep})
-
+                print(f"  [{page_name}] Boards={page_boards}, Labels={page_labels}, Lines={page_lines}")
 
     except zipfile.BadZipFile:
         print(f"[ERROR] No es un ZIP válido: {file_path}")
+        return []
     except Exception as e:
         import traceback
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] Leyendo VSDX: {e}")
         traceback.print_exc()
+        return []
 
-    # Deduplicar
+    print(f"\n[TOTAL] Boards={len(boards_all)}, Labels={len(labels_all)}, Lines={len(lines_all)}")
+
+    # ── Debug: primeros shapes ─────────────────────────────────────────────────
+    print("\n[DEBUG] Primeros 15 boards:")
+    for b in boards_all[:15]:
+        print(f"  BOARD '{b['text'][:50]}' @ ({b['x']:.3f}, {b['y']:.3f}) W={b['w']:.3f} H={b['h']:.3f} [{b['page']}]")
+    print("\n[DEBUG] Primeros 15 labels:")
+    for l in labels_all[:15]:
+        print(f"  LABEL '{l['text'][:50]}' @ ({l['x']:.3f}, {l['y']:.3f}) [{l['page']}]")
+    if lines_all:
+        print("\n[DEBUG] Primeras 5 líneas:")
+        for ln in lines_all[:5]:
+            print(f"  LINE  bx={ln['bx']:.3f} by={ln['by']:.3f} ex={ln['ex']:.3f} ey={ln['ey']:.3f} [{ln['page']}]")
+
+    # ── 2. Detectar sitio por página ──────────────────────────────────────────
+    pages_seen = list(dict.fromkeys(b['page'] for b in boards_all + labels_all))
+    site_map = {}
+    for pg in pages_seen:
+        pg_boards = [b for b in boards_all if b['page'] == pg]
+        pg_labels = [l for l in labels_all if l['page'] == pg]
+        site_map[pg] = detect_site(pg_labels, pg_boards)
+        print(f"  [{pg}] Sitio detectado: {site_map[pg]}")
+
+    # ── 3. Procesar líneas → conexiones ───────────────────────────────────────
+    raw_connections = []
+
+    # Debug de primera línea
+    if lines_all:
+        ln = lines_all[0]
+        pg = ln['page']
+        print(f"\n[DEBUG] Primera línea: bx={ln['bx']:.3f} by={ln['by']:.3f} ex={ln['ex']:.3f} ey={ln['ey']:.3f}")
+        b_f = find_closest_board(ln['bx'], ln['by'], pg, boards_all)
+        b_t = find_closest_board(ln['ex'], ln['ey'], pg, boards_all)
+        l_f = find_closest_label(ln['bx'], ln['by'], pg, labels_all, label_threshold)
+        l_t = find_closest_label(ln['ex'], ln['ey'], pg, labels_all, label_threshold)
+        print(f"  FROM board: {b_f['text'][:30] if b_f else 'None'}")
+        print(f"  FROM label: {l_f['text'][:30] if l_f else 'None'}")
+        print(f"  TO   board: {b_t['text'][:30] if b_t else 'None'}")
+        print(f"  TO   label: {l_t['text'][:30] if l_t else 'None'}")
+
+    for line in lines_all:
+        pg   = line['page']
+        site = site_map.get(pg, 'SITE_UNK')
+
+        # ── Extremo FROM ──
+        b_f = find_closest_board(line['bx'], line['by'], pg, boards_all)
+        l_f = find_closest_label(line['bx'], line['by'], pg, labels_all, label_threshold)
+
+        # ── Extremo TO ──
+        b_t = find_closest_board(line['ex'], line['ey'], pg, boards_all)
+        l_t = find_closest_label(line['ex'], line['ey'], pg, labels_all, label_threshold)
+
+        # ── Resolver endpoint FROM ──
+        from_ep = None
+        # Prioridad 1: tiene board cercano → endpoint de placa
+        if b_f:
+            parsed = parse_board_shape(b_f['text'])
+            if parsed:
+                port_txt = ''
+                if l_f and not is_annotation(l_f['text']) and not is_odf_label(l_f['text']):
+                    port_txt = l_f['text']
+                from_ep = build_endpoint("F:", parsed, port_txt, site)
+        # Prioridad 2: sin board → buscar label ODF con radio ampliado
+        else:
+            odf_l = find_closest_odf_label(line['bx'], line['by'], pg, labels_all, threshold=0.6)
+            if odf_l:
+                odf = extract_odf_name(odf_l['text'], site)
+                from_ep = odf if odf.startswith('F:') else f"F:{odf}"
+
+        # ── Resolver endpoint TO ──
+        to_ep = None
+        # Prioridad 1: tiene board cercano
+        if b_t:
+            parsed = parse_board_shape(b_t['text'])
+            if parsed:
+                port_txt = ''
+                if l_t and not is_annotation(l_t['text']) and not is_odf_label(l_t['text']):
+                    port_txt = l_t['text']
+                to_ep = build_endpoint("T:", parsed, port_txt, site)
+        # Prioridad 2: buscar label ODF con radio ampliado
+        else:
+            odf_l = find_closest_odf_label(line['ex'], line['ey'], pg, labels_all, threshold=0.6)
+            if odf_l:
+                odf = extract_odf_name(odf_l['text'], site)
+                to_ep = odf if odf.startswith('T:') else f"T:{odf}"
+
+        if from_ep and to_ep:
+            raw_connections.append({'FROM:': from_ep, 'TO:': to_ep})
+
+    # Mostrar primeras 25 crudas
+    print(f"\n[RAW] {len(raw_connections)} conexiones antes de filtros. Primeras 25:")
+    for i, c in enumerate(raw_connections[:25], 1):
+        print(f"  {i:02d}. {c['FROM:']:50s} | {c['TO:']}")
+
+    # ── 4. Filtros ─────────────────────────────────────────────────────────────
+    filtered = []
+    for c in raw_connections:
+        f_ep = c['FROM:']
+        t_ep = c['TO:']
+
+        # Descartar si son iguales
+        if f_ep == t_ep:
+            continue
+
+        # Filtro loopback: mismo board+rack+subrack+slot (diferentes puertos OK)
+        # Extraemos el "cuerpo" antes del último guión (que es el puerto)
+        def body(ep):
+            parts = ep.split('-')
+            return '-'.join(parts[:-1]) if len(parts) > 1 else ep
+
+        if body(f_ep) == body(t_ep) and body(f_ep) != f_ep:
+            # Solo es loopback si ambos extremos son del mismo board
+            # (ej: WSMD9-OUT → WSMD9-IN en el mismo slot → loopback real)
+            # Conexiones cross-board en mismo rack SÍ son válidas
+            continue
+
+        filtered.append(c)
+
+    # ── 5. Deduplicar ──────────────────────────────────────────────────────────
     seen = set()
     unique = []
-    for c in extracted:
+    for c in filtered:
         key = (c['FROM:'], c['TO:'])
         if key not in seen:
             seen.add(key)
             unique.append(c)
 
-    print(f"\n[RESULT] Total conexiones únicas: {len(unique)}")
+    # Mostrar primeras 25 finales
+    print(f"\n[FINAL] {len(unique)} conexiones únicas. Primeras 25:")
+    for i, c in enumerate(unique[:25], 1):
+        print(f"  {i:02d}. {c['FROM:']:50s} | {c['TO:']}")
+
     return unique
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Generación de Excel
+# ─────────────────────────────────────────────────────────────────────────────
 def generate_excel(connections: list, output_path: str) -> int:
-    """Guarda las conexiones en Excel con columnas FROM: y TO:."""
+    """Guarda las conexiones en Excel. Retorna el número de filas."""
     if not connections:
         print("[WARN] Sin conexiones para guardar.")
         return 0
     df = pd.DataFrame(connections, columns=['FROM:', 'TO:'])
     df.drop_duplicates(inplace=True)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True) if os.path.dirname(output_path) else None
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     df.to_excel(output_path, index=False)
-    print(f"[OK] Excel guardado en: {output_path} ({len(df)} filas)")
+    print(f"[OK] Excel guardado: {output_path} ({len(df)} filas)")
     return len(df)
