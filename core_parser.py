@@ -57,6 +57,57 @@ _TECHNICAL_NOISE = [
     r'^[A-Z]\d{1,2}(?=[A-Z])', # Prefix noise like 'G2' in 'G2WSMD9'
 ]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lógica de Negocio de Telecomunicaciones (Senior Level)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Whitelist de puertos que requieren parcheo físico (excepciones a la regla anti-loopback)
+PHYSICAL_PATCH_WHITELIST = {
+    'DAP': ['VO_1', 'VO_2', 'IN_1', 'IN_2', 'VI_1', 'VI_2', 'OUT_1', 'OUT_2'],
+    'WSMD9': ['EXP', 'COM'],
+    'DWSS20': ['EXP', 'COM'],
+    'M808SA': ['DM01', 'AM01', 'IN(P)', 'OUT(P)'],
+    'OPM8': [f'IN{i}' for i in range(1, 9)] + ['MON', 'MONT', 'MONR'],
+    'AUX': ['ETH', 'NM', 'EXT', 'RJ45'],
+    'CTU': ['ETH', 'NM', 'EXT', 'RJ45'],
+}
+
+def is_internal_loop(f_ep: str, t_ep: str) -> bool:
+    """Verifica si la conexión es un bucle interno (mismo rack/slot/board)."""
+    def get_body(ep):
+        # Quitar prefijo F: o T:
+        ep_no_pref = ep[2:] if ep.startswith(('F:', 'T:')) else ep
+        parts = ep_no_pref.split('-')
+        return '-'.join(parts[:-1]) if len(parts) > 1 else ep_no_pref
+    
+    f_body = get_body(f_ep)
+    t_body = get_body(t_ep)
+    return f_body == t_body and f_body != f_ep
+
+def is_bridge_exception(ep: str) -> bool:
+    """Verifica si el puerto pertenece a la lista blanca de parcheo obligatorio."""
+    parts = ep.split('-')
+    if len(parts) < 3: return False
+    board = parts[-2].upper()
+    port = parts[-1].upper()
+    
+    allowed = PHYSICAL_PATCH_WHITELIST.get(board, [])
+    return port in allowed
+
+def validate_telecom_connection(f_ep: str, t_ep: str) -> bool:
+    """
+    Motor de Filtrado de Ingeniería (is_physical_fiber).
+    Aplica la regla Anti-Loopback con excepciones de la WhiteList.
+    """
+    if f_ep == t_ep: return False
+    
+    if is_internal_loop(f_ep, t_ep):
+        # Es loopback. Permitir solo si alguno de los puertos es una excepción técnica.
+        if is_bridge_exception(f_ep) or is_bridge_exception(t_ep):
+            return True
+        return False # Bloquear loopback puro
+    return True
+
 
 def normalize_board(raw: str) -> str:
     """Normaliza el nombre de una placa Huawei DWDM."""
@@ -163,8 +214,9 @@ def parse_board_shape(text: str):
 _ANNOTATION_PATTERNS = [
     re.compile(r'^\d+(\.\d+)?\s*(dBm|THz|km|dB)$', re.IGNORECASE),  # valores físicos
     re.compile(r'^\d+km[\-\s]?v\d', re.IGNORECASE),                   # '150km-V3.1'
-    re.compile(r'^v\d', re.IGNORECASE),                                # versiones Vx.x
+    re.compile(r'^v\d+(\.\d+)?$', re.IGNORECASE),                     # versiones V3.1
     re.compile(r'^\d+$'),                                              # solo dígitos
+    re.compile(r'^\d+\)$'),                                            # números aislados tipo '1)'
     re.compile(r'^(APD|PIN)$', re.IGNORECASE),                        # detectores
     re.compile(r'^[RT]X\d{4,}$', re.IGNORECASE),                     # frecuencias RX21491, TX11511
     re.compile(r'150\s*km', re.IGNORECASE),
@@ -352,13 +404,20 @@ def _clean_port(raw: str) -> str:
     return s.strip().upper() or 'P'
 
 
-def build_endpoint(prefix: str, board_parsed: tuple, port_text: str, site: str) -> str:
+def build_endpoint(prefix: str, board_parsed: tuple, port_text: str, site: str, project: str = 'Core', board_raw: str = '') -> str:
     """
-    Construye: F:RD_MAIP_VTR_1B(04)-WSMD9-OUT
-    board_parsed = (board_norm, rack, subrack, slot)
+    Construye el endpoint según el proyecto.
+    Genérico: F:NOMBRE_PLACA - PUERTO
+    Estándar: F:RD_MAIP_VTR_1B(04)-WSMD9-OUT
     """
-    board_norm, rack, subrack, slot = board_parsed
     port = _clean_port(port_text) if port_text else 'P'
+    
+    if project == 'Genérico':
+        # Limpiar el texto original de la placa (quitar saltos de línea y espacios extra)
+        b_name = board_raw.split('(')[0].strip() if board_raw else board_parsed[0]
+        return f"{prefix}{b_name} - {port}"
+
+    board_norm, rack, subrack, slot = board_parsed
     return f"{prefix}RD_{site}_{rack}{subrack}({slot})-{board_norm}-{port}"
 
 def find_closest_odf_label(x, y, page, labels, threshold=0.6):
@@ -381,7 +440,7 @@ def find_closest_odf_label(x, y, page, labels, threshold=0.6):
 
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
-                           label_threshold: float = 0.8) -> list:
+                           label_threshold: float = 0.8, project_name: str = 'Core') -> list:
     """
     Parsea un VSDX Huawei y retorna lista de dicts {'FROM:': str, 'TO:': str}.
 
@@ -520,7 +579,7 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                 port_txt = ''
                 if l_f and not is_annotation(l_f['text']) and not is_odf_label(l_f['text']):
                     port_txt = l_f['text']
-                from_ep = build_endpoint("F:", parsed, port_txt, site)
+                from_ep = build_endpoint("F:", parsed, port_txt, site, project_name, b_f['text'])
         # Prioridad 2: sin board → buscar label ODF con radio ampliado
         else:
             odf_l = find_closest_odf_label(line['bx'], line['by'], pg, labels, threshold=0.6)
@@ -537,7 +596,7 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                 port_txt = ''
                 if l_t and not is_annotation(l_t['text']) and not is_odf_label(l_t['text']):
                     port_txt = l_t['text']
-                to_ep = build_endpoint("T:", parsed, port_txt, site)
+                to_ep = build_endpoint("T:", parsed, port_txt, site, project_name, b_t['text'])
         # Prioridad 2: buscar label ODF con radio ampliado
         else:
             odf_l = find_closest_odf_label(line['ex'], line['ey'], pg, labels, threshold=0.6)
@@ -583,20 +642,8 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
         f_ep = c['FROM:']
         t_ep = c['TO:']
 
-        # Descartar si son iguales
-        if f_ep == t_ep:
-            continue
-
-        # Filtro loopback: mismo board+rack+subrack+slot (diferentes puertos OK)
-        # Extraemos el "cuerpo" antes del último guión (que es el puerto)
-        def body(ep):
-            parts = ep.split('-')
-            return '-'.join(parts[:-1]) if len(parts) > 1 else ep
-
-        if body(f_ep) == body(t_ep) and body(f_ep) != f_ep:
-            # Solo es loopback si ambos extremos son del mismo board
-            # (ej: WSMD9-OUT → WSMD9-IN en el mismo slot → loopback real)
-            # Conexiones cross-board en mismo rack SÍ son válidas
+        # Reglas de negocio: Anti-Loopback y Whitelist
+        if not validate_telecom_connection(f_ep, t_ep):
             continue
 
         filtered.append(c)

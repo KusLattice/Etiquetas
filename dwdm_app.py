@@ -82,11 +82,11 @@ class App(TkinterDnDCTk):
 
         # Configuración de Proyectos por Empresa
         self.projects_map = {
-            "Movistar": ["Core"],
-            "ClaroVTR": ["Merge"],
-            "WOM": ["Core"],
-            "Entel": ["Core"],
-            "Tigo": ["Core"]
+            "Movistar": ["Core", "Genérico"],
+            "ClaroVTR": ["Merge", "Genérico"],
+            "WOM": ["Core", "Genérico"],
+            "Entel": ["Core", "Genérico"],
+            "Tigo": ["Core", "Genérico"]
         }
 
         # Cargar Logos
@@ -380,7 +380,7 @@ class App(TkinterDnDCTk):
                 conns = parse_pdf_connections(self.selected_file)
             else:
                 self.log("[VSDX] Parseando diagrama Visio...")
-                conns = parse_vsdx_connections(self.selected_file, telco_name=telco)
+                conns = parse_vsdx_connections(self.selected_file, telco_name=telco, project_name=project)
 
             self.log(f"Se extrajeron {len(conns)} conexiones físicas.")
             
