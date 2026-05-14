@@ -82,8 +82,8 @@ class App(TkinterDnDCTk):
 
         # Configuración de Proyectos por Empresa
         self.projects_map = {
-            "ClaroVTR": ["Merge"],
             "Movistar": ["Core"],
+            "ClaroVTR": ["Merge"],
             "WOM": ["Core"],
             "Entel": ["Core"],
             "Tigo": ["Core"]
@@ -111,11 +111,11 @@ class App(TkinterDnDCTk):
         self.logo_container.grid_propagate(False)
 
         # Logo de la Operadora actual
-        self.logo_display = ctk.CTkLabel(self.logo_container, text="", image=self.logos.get("ClaroVTR"))
+        self.logo_display = ctk.CTkLabel(self.logo_container, text="", image=self.logos.get("Movistar"))
         self.logo_display.place(relx=0.5, rely=0.5, anchor="center")
 
         # Operadora
-        self.telco_var = ctk.StringVar(value="ClaroVTR")
+        self.telco_var = ctk.StringVar(value="Movistar")
         self.telco_menu = ctk.CTkOptionMenu(
             self.selectors_frame,
             values=list(self.projects_map.keys()),
@@ -129,10 +129,10 @@ class App(TkinterDnDCTk):
         self.telco_menu.grid(row=0, column=1, padx=5, pady=5)
 
         # Proyecto (Sub-menú)
-        self.project_var = ctk.StringVar(value="Merge")
+        self.project_var = ctk.StringVar(value="Core")
         self.project_menu = ctk.CTkOptionMenu(
             self.selectors_frame,
-            values=self.projects_map["ClaroVTR"],
+            values=self.projects_map["Movistar"],
             variable=self.project_var,
             font=ctk.CTkFont(weight="bold"),
             width=140,

@@ -3,9 +3,13 @@ core_parser.py — Parser DWDM Huawei para diagramas Visio (.vsdx)
 Genera Excel con columnas FROM: y TO: para impresora Brother P-touch.
 
 Arquitectura:
-  - Shapes clasificados en 3 tipos: boards (h>>w), labels (pequeños), lines (BeginX/EndX)
-  - Proximidad boards: overlap en Y + distancia X mínima  (lógica scratch.py)
-  - Proximidad labels: distancia Euclidiana con threshold ajustable
+  - Shapes clasificados en 3 tipos:
+      boards: h > 1.0 y w < 1.0  → info de hardware (placa, rack, slot)
+      labels: resto con texto     → info de puerto
+      lines: tienen BeginX/EndX  → conexiones a resolver
+  - Para cada extremo de línea se busca por separado:
+      find_closest_board() → board (hardware)
+      find_closest_label() → label  (puerto)
   - Normalización completa de placas, sitio, subrack/slot y puertos
 """
 
@@ -251,10 +255,15 @@ _SITE_PATTERNS = [
 _SITE_BLACKLIST = {'OPM', 'G2OH', 'G2DAP', 'G2WS', 'FON'}
 
 
-def detect_site(labels: list, boards: list) -> str:
-    """Detecta (city, ope) del sitio local; prioriza VTR sobre FON."""
+def detect_site(labels, boards) -> str:
+    """
+    Detecta (city, ope) del sitio local; prioriza VTR sobre FON.
+    Acepta tanto listas como dicts {sid: shape_info}.
+    """
     hits = []
-    candidates = [l['text'] for l in labels] + [b['text'] for b in boards]
+    _labels = labels.values() if isinstance(labels, dict) else labels
+    _boards = boards.values() if isinstance(boards, dict) else boards
+    candidates = [l['text'] for l in _labels] + [b['text'] for b in _boards]
     for text in candidates:
         tu = text.upper()
         for pat in _SITE_PATTERNS:
@@ -276,11 +285,13 @@ def detect_site(labels: list, boards: list) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 def find_closest_board(x, y, page, boards, y_tolerance=0.5, x_limit=3.0):
     """
-    Encuentra el board que contenga el punto Y (con tolerancia) y sea más cercano en X.
-    Basado en scratch.py — overlap vertical + distancia horizontal.
+    Encuentra el board más cercano al punto (x, y) en la misma página.
+    Criterio: overlap vertical (con tolerancia) + menor distancia horizontal.
+    boards puede ser dict {sid: info} o lista.
     """
     best, min_dist = None, x_limit
-    for b in boards:
+    items = boards.values() if isinstance(boards, dict) else boards
+    for b in items:
         if b['page'] != page:
             continue
         if abs(b['y'] - y) <= b['h'] / 2 + y_tolerance:
@@ -292,9 +303,13 @@ def find_closest_board(x, y, page, boards, y_tolerance=0.5, x_limit=3.0):
 
 
 def find_closest_label(x, y, page, labels, threshold=0.5):
-    """Distancia Euclidiana. Retorna None si ninguno está dentro del threshold."""
+    """
+    Distancia Euclidiana al label más cercano. Retorna None si supera el threshold.
+    labels puede ser dict {sid: info} o lista.
+    """
     best, min_dist = None, float('inf')
-    for l in labels:
+    items = labels.values() if isinstance(labels, dict) else labels
+    for l in items:
         if l['page'] != page:
             continue
         dist = ((l['x'] - x) ** 2 + (l['y'] - y) ** 2) ** 0.5
@@ -347,9 +362,13 @@ def build_endpoint(prefix: str, board_parsed: tuple, port_text: str, site: str) 
     return f"{prefix}RD_{site}_{rack}{subrack}({slot})-{board_norm}-{port}"
 
 def find_closest_odf_label(x, y, page, labels, threshold=0.6):
-    """Búsqueda de labels ODF con radio mayor (los ODF suelen estar alejados del extremo)."""
+    """
+    Búsqueda de labels ODF con radio mayor (los ODF suelen estar alejados del extremo).
+    labels puede ser dict {sid: info} o lista.
+    """
     best, min_dist = None, float('inf')
-    for l in labels:
+    items = labels.values() if isinstance(labels, dict) else labels
+    for l in items:
         if l['page'] != page:
             continue
         if not is_odf_label(l['text']):
@@ -365,10 +384,15 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                            label_threshold: float = 0.8) -> list:
     """
     Parsea un VSDX Huawei y retorna lista de dicts {'FROM:': str, 'TO:': str}.
+
+    Clasificación de shapes:
+      boards {sid: info} — h > 1.0 y w < 1.0  → info de hardware (placa/rack/slot)
+      labels {sid: info} — resto con texto      → info de puerto
+      lines  [...]       — tienen BeginX/EndX   → conexiones a resolver
     """
-    boards_all = []
-    labels_all = []
-    lines_all  = []
+    boards = {}   # sid → {'x','y','w','h','text','page'}  — shapes de hardware
+    labels = {}   # sid → {'x','y','text','page'}          — shapes de puerto/anotación
+    lines_all = []
 
     # ── 1. Leer y clasificar todos los shapes ─────────────────────────────────
     try:
@@ -385,6 +409,7 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                 page_boards, page_labels, page_lines = 0, 0, 0
 
                 for shape in root.findall('.//v:Shape', NS):
+                    sid  = shape.attrib.get('ID', '')
                     text = get_text(shape)
                     pinx = get_num(shape, 'PinX')
                     piny = get_num(shape, 'PinY')
@@ -394,7 +419,7 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                     ex   = get_num_or_none(shape, 'EndX')
 
                     if bx is not None and ex is not None:
-                        # Es una línea/conector
+                        # ── Línea / conector ──────────────────────────────────
                         by = get_num(shape, 'BeginY')
                         ey = get_num(shape, 'EndY')
                         lines_all.append({
@@ -403,21 +428,22 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                         })
                         page_lines += 1
 
-                    elif h > 0.4 and h > w * 1.5 and text:
-                        # Board: shape vertical (h significativamente mayor que w)
-                        # Incluye boards grandes (WSMD9, DAP ~h=5.4) y pequeños (OPM8 ~h=0.6)
-                        boards_all.append({
+                    elif h > 1.0 and w < 1.0 and text:
+                        # ── Board (hardware): alto y angosto ──────────────────
+                        # h > 1.0: altura mínima de 1 unidad Visio (~2.54 cm)
+                        # w < 1.0: ancho menor a 1 unidad (shapes de placa típicos)
+                        boards[f"{page_name}_{sid}"] = {
                             'x': pinx, 'y': piny, 'w': w, 'h': h,
                             'text': text, 'page': page_name
-                        })
+                        }
                         page_boards += 1
 
                     elif text:
-                        # Label: cualquier otro shape con texto
-                        labels_all.append({
+                        # ── Label (puerto / anotación): el resto con texto ────
+                        labels[f"{page_name}_{sid}"] = {
                             'x': pinx, 'y': piny,
                             'text': text, 'page': page_name
-                        })
+                        }
                         page_labels += 1
 
                 print(f"  [{page_name}] Boards={page_boards}, Labels={page_labels}, Lines={page_lines}")
@@ -431,14 +457,14 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
         traceback.print_exc()
         return []
 
-    print(f"\n[TOTAL] Boards={len(boards_all)}, Labels={len(labels_all)}, Lines={len(lines_all)}")
+    print(f"\n[TOTAL] Boards={len(boards)}, Labels={len(labels)}, Lines={len(lines_all)}")
 
     # ── Debug: primeros shapes ─────────────────────────────────────────────────
-    print("\n[DEBUG] Primeros 15 boards:")
-    for b in boards_all[:15]:
+    print("\n[DEBUG] Primeros 15 boards (hardware):")
+    for b in list(boards.values())[:15]:
         print(f"  BOARD '{b['text'][:50]}' @ ({b['x']:.3f}, {b['y']:.3f}) W={b['w']:.3f} H={b['h']:.3f} [{b['page']}]")
-    print("\n[DEBUG] Primeros 15 labels:")
-    for l in labels_all[:15]:
+    print("\n[DEBUG] Primeros 15 labels (puertos):")
+    for l in list(labels.values())[:15]:
         print(f"  LABEL '{l['text'][:50]}' @ ({l['x']:.3f}, {l['y']:.3f}) [{l['page']}]")
     if lines_all:
         print("\n[DEBUG] Primeras 5 líneas:")
@@ -446,11 +472,13 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
             print(f"  LINE  bx={ln['bx']:.3f} by={ln['by']:.3f} ex={ln['ex']:.3f} ey={ln['ey']:.3f} [{ln['page']}]")
 
     # ── 2. Detectar sitio por página ──────────────────────────────────────────
-    pages_seen = list(dict.fromkeys(b['page'] for b in boards_all + labels_all))
+    pages_seen = list(dict.fromkeys(
+        info['page'] for info in list(boards.values()) + list(labels.values())
+    ))
     site_map = {}
     for pg in pages_seen:
-        pg_boards = [b for b in boards_all if b['page'] == pg]
-        pg_labels = [l for l in labels_all if l['page'] == pg]
+        pg_boards = {k: v for k, v in boards.items() if v['page'] == pg}
+        pg_labels = {k: v for k, v in labels.items() if v['page'] == pg}
         site_map[pg] = detect_site(pg_labels, pg_boards)
         print(f"  [{pg}] Sitio detectado: {site_map[pg]}")
 
@@ -462,10 +490,10 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
         ln = lines_all[0]
         pg = ln['page']
         print(f"\n[DEBUG] Primera línea: bx={ln['bx']:.3f} by={ln['by']:.3f} ex={ln['ex']:.3f} ey={ln['ey']:.3f}")
-        b_f = find_closest_board(ln['bx'], ln['by'], pg, boards_all)
-        b_t = find_closest_board(ln['ex'], ln['ey'], pg, boards_all)
-        l_f = find_closest_label(ln['bx'], ln['by'], pg, labels_all, label_threshold)
-        l_t = find_closest_label(ln['ex'], ln['ey'], pg, labels_all, label_threshold)
+        b_f = find_closest_board(ln['bx'], ln['by'], pg, boards)
+        b_t = find_closest_board(ln['ex'], ln['ey'], pg, boards)
+        l_f = find_closest_label(ln['bx'], ln['by'], pg, labels, label_threshold)
+        l_t = find_closest_label(ln['ex'], ln['ey'], pg, labels, label_threshold)
         print(f"  FROM board: {b_f['text'][:30] if b_f else 'None'}")
         print(f"  FROM label: {l_f['text'][:30] if l_f else 'None'}")
         print(f"  TO   board: {b_t['text'][:30] if b_t else 'None'}")
@@ -475,13 +503,13 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
         pg   = line['page']
         site = site_map.get(pg, 'SITE_UNK')
 
-        # ── Extremo FROM ──
-        b_f = find_closest_board(line['bx'], line['by'], pg, boards_all)
-        l_f = find_closest_label(line['bx'], line['by'], pg, labels_all, label_threshold)
+        # ── Extremo FROM: buscar board (hardware) Y label (puerto) por separado ──
+        b_f = find_closest_board(line['bx'], line['by'], pg, boards)
+        l_f = find_closest_label(line['bx'], line['by'], pg, labels, label_threshold)
 
-        # ── Extremo TO ──
-        b_t = find_closest_board(line['ex'], line['ey'], pg, boards_all)
-        l_t = find_closest_label(line['ex'], line['ey'], pg, labels_all, label_threshold)
+        # ── Extremo TO: ídem ──────────────────────────────────────────────────
+        b_t = find_closest_board(line['ex'], line['ey'], pg, boards)
+        l_t = find_closest_label(line['ex'], line['ey'], pg, labels, label_threshold)
 
         # ── Resolver endpoint FROM ──
         from_ep = None
@@ -495,14 +523,14 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                 from_ep = build_endpoint("F:", parsed, port_txt, site)
         # Prioridad 2: sin board → buscar label ODF con radio ampliado
         else:
-            odf_l = find_closest_odf_label(line['bx'], line['by'], pg, labels_all, threshold=0.6)
+            odf_l = find_closest_odf_label(line['bx'], line['by'], pg, labels, threshold=0.6)
             if odf_l:
                 odf = extract_odf_name(odf_l['text'], site)
                 from_ep = odf if odf.startswith('F:') else f"F:{odf}"
 
         # ── Resolver endpoint TO ──
         to_ep = None
-        # Prioridad 1: tiene board cercano
+        # Prioridad 1: tiene board (hardware) → combinar con label (puerto)
         if b_t:
             parsed = parse_board_shape(b_t['text'])
             if parsed:
@@ -512,7 +540,7 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
                 to_ep = build_endpoint("T:", parsed, port_txt, site)
         # Prioridad 2: buscar label ODF con radio ampliado
         else:
-            odf_l = find_closest_odf_label(line['ex'], line['ey'], pg, labels_all, threshold=0.6)
+            odf_l = find_closest_odf_label(line['ex'], line['ey'], pg, labels, threshold=0.6)
             if odf_l:
                 odf = extract_odf_name(odf_l['text'], site)
                 to_ep = odf if odf.startswith('T:') else f"T:{odf}"
@@ -526,8 +554,8 @@ def parse_vsdx_connections(file_path: str, telco_name: str = 'ClaroVTR',
             if b_f:
                 # Buscar label tipo "Equipo X" o "Rack X" arriba del board
                 closest_eq = None
-                min_eq_dist = 5.0 # límite de búsqueda
-                for l in labels_all:
+                min_eq_dist = 5.0  # límite de búsqueda
+                for l in labels.values():
                     if l['page'] == pg and ('EQUIPO' in l['text'].upper() or 'RACK' in l['text'].upper()):
                         dist = ((l['x'] - b_f['x'])**2 + (l['y'] - b_f['y'])**2)**0.5
                         if dist < min_eq_dist:
