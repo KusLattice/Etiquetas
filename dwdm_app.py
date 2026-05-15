@@ -30,35 +30,76 @@ class App(TkinterDnDCTk):
         
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(4, weight=1)
-        # Temas Disponibles
+        # Temas Disponibles - UI/UX DE VANGUARDIA (CHILOTE-CYBERPUNK)
+        # Adaptación del esquema Flutter solicitado al motor CustomTkinter
         self.themes = {
+            "El Caleuche": {
+                "bg": "#0F172A", "header": "#1E293B", "btn_acc": "#10B981", "btn_ok": "#059669", 
+                "text": "#10B981", "btn_text": "#FFFFFF", "accent": "#10B981", "font": "Courier New",
+                "decor": "🚢 👻 🌫️ ⚓ 🌑 | GHOST-SHIP OVERDRIVE v2.0"
+            },
+            "La Pincoya": {
+                "bg": "#042F2E", "header": "#134E4A", "btn_acc": "#F59E0B", "btn_ok": "#D97706", 
+                "text": "#F59E0B", "btn_text": "#000000", "accent": "#F59E0B", "font": "Consolas",
+                "decor": "🧜‍♀️ 🐚 🌊 🏝️ 🐠 | NEON-BIOLUMINESCENCE v2.0"
+            },
+            "El Trauco": {
+                "bg": "#064E3B", "header": "#065F46", "btn_acc": "#B91C1C", "btn_ok": "#991B1B", 
+                "text": "#4AF626", "btn_text": "#FFFFFF", "accent": "#B91C1C", "font": "Consolas",
+                "decor": "🌲 🍄 👺 🌿 🪵 | CHILOTE-CYBERPUNK v2.0"
+            },
             "Dark": {
                 "bg": "#0a0a0a", "header": "#1a1a1a", "btn_acc": "#2c3e50", "btn_ok": "#27ae60", 
                 "text": "#e0e0e0", "btn_text": "white", "accent": "#3498db", "font": "Inter",
                 "decor": "🖥️ 🛰️ 🏢 📶 💠"
-            },
-            "Matrix": {
-                "bg": "#000000", "header": "#000000", "btn_acc": "#003b00", "btn_ok": "#008f11", 
-                "text": "#00ff41", "btn_text": "#00ff41", "accent": "#00ff41", "font": "Consolas",
-                "decor": "0101 1010 0110 1101"
-            },
-            "El Trauco": {
-                "bg": "#142114", "header": "#0a120a", "btn_acc": "#2d5a27", "btn_ok": "#3e7a3a", 
-                "text": "#d4e1d1", "btn_text": "white", "accent": "#4a7c44", "font": "Georgia",
-                "decor": "🌲 🍄 👺 🌿 🪵"
-            },
-            "La Pincoya": {
-                "bg": "#003d4d", "header": "#002b36", "btn_acc": "#007c91", "btn_ok": "#4db6ac", 
-                "text": "#e0f2f1", "btn_text": "white", "accent": "#26c6da", "font": "Trebuchet MS",
-                "decor": "🧜‍♀️ 🐚 🌊 🏝️ 🐠"
-            },
-            "El Caleuche": {
-                "bg": "#0d1a1a", "header": "#050f0f", "btn_acc": "#1a4a4a", "btn_ok": "#26a69a", 
-                "text": "#a7ffeb", "btn_text": "black", "accent": "#64ffda", "font": "Courier New",
-                "decor": "🚢 👻 🌫️ ⚓ 🌑"
             }
         }
-        self.current_theme_name = "Dark"
+        
+        """
+        FLUTTER THEME MIGRATION BLOCK (VANGUARDIA)
+        // 1. TEMA 'EL CALEUCHE' (Nautical Ghost - Glassmorphism)
+        BoxDecoration caleucheDecoration = BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF0F172A), Color(0xFF1E293B)],
+          ),
+          border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
+          borderRadius: BorderRadius.circular(12),
+        );
+        Color caleucheAccent = const Color(0xFF10B981);
+
+        // 2. TEMA 'LA PINCOYA' (Oceanic Gold - Profundidad visual)
+        BoxDecoration pincoyaDecoration = BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF134E4A), Color(0xFF042F2E)],
+          ),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: const [
+            BoxShadow(color: Colors.black54, blurRadius: 20, offset: Offset(0, 10)),
+          ],
+        );
+        Color pincoyaAccent = const Color(0xFFF59E0B);
+
+        // 3. TEMA 'EL TRAUCO' (Forest Tech - Industrial Inset)
+        BoxDecoration traucoDecoration = BoxDecoration(
+          color: const Color(0xFF064E3B),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: const [
+            BoxShadow(color: Colors.black87, blurRadius: 10, offset: Offset(0, 0)), // Inset shadow sim
+          ],
+          image: const DecorationImage(
+            image: AssetImage('assets/carbon_pattern.png'), // Textura
+            opacity: 0.05,
+            repeat: ImageRepeat.repeat,
+          ),
+        );
+        Color traucoAccent = const Color(0xFFB91C1C);
+        """
+        
+        self.current_theme_name = "El Caleuche"
 
         # Header Frame
         self.header_frame = ctk.CTkFrame(self, fg_color="#1a1a2e", corner_radius=12)
@@ -83,7 +124,7 @@ class App(TkinterDnDCTk):
         # Configuración de Proyectos por Empresa
         self.projects_map = {
             "Movistar": ["Core", "Genérico"],
-            "ClaroVTR": ["Merge", "Genérico"],
+            "ClaroVTR": ["Core", "Merge", "Genérico"],
             "WOM": ["Core", "Genérico"],
             "Entel": ["Core", "Genérico"],
             "Tigo": ["Core", "Genérico"]
@@ -142,7 +183,7 @@ class App(TkinterDnDCTk):
         self.project_menu.grid(row=1, column=1, padx=5, pady=5)
 
         # Selector de Temas
-        self.theme_var = ctk.StringVar(value="Dark")
+        self.theme_var = ctk.StringVar(value="El Trauco")
         self.theme_menu = ctk.CTkOptionMenu(
             self.selectors_frame,
             values=list(self.themes.keys()),
@@ -165,8 +206,8 @@ class App(TkinterDnDCTk):
         )
         self.subtitle_label.grid(row=1, column=0, padx=20, pady=(8, 10), sticky="w")
 
-        # Drag and Drop Frame
-        self.file_frame = ctk.CTkFrame(self, height=120, fg_color="#1e1e1e", border_width=2, border_color="#3a7ebf")
+        # Drag and Drop Frame - Glassmorphism Emulation
+        self.file_frame = ctk.CTkFrame(self, height=120, fg_color="transparent", border_width=2, border_color="#3a7ebf")
         self.file_frame.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
         self.file_frame.grid_columnconfigure(0, weight=1)
         self.file_frame.grid_propagate(False)
@@ -185,7 +226,7 @@ class App(TkinterDnDCTk):
         self.file_frame.bind("<Button-1>", lambda e: self.select_file())
         self.file_label.bind("<Button-1>", lambda e: self.select_file())
 
-        # Consola de log
+        # Consola de log (Tipografía hacker monoespaciada forzada por theme)
         self.console = ctk.CTkTextbox(self, state="disabled")
         self.console.grid(row=4, column=0, padx=20, pady=10, sticky="nsew")
 
@@ -280,27 +321,23 @@ class App(TkinterDnDCTk):
         # Actualizar Decoración
         self.decor_label.configure(text=theme["decor"], text_color=theme["text"])
         
-        # Consola y detalles específicos
-        if theme_name == "Matrix":
-            console_bg = "#000000"
-            console_text = "#00ff41"
+        # Consola Hacker Monoespaciada obligatoria para los temas
+        if theme_name == "El Trauco":
+            console_bg = "#070E0A"
+            console_text = "#4AF626"
             font_family = "Consolas"
-        elif theme_name == "El Trauco":
-            console_bg = "#0d140d"
-            console_text = "#a3b1a3"
-            font_family = "Georgia"
         elif theme_name == "La Pincoya":
-            console_bg = "#002b36"
-            console_text = "#b2dfdb"
-            font_family = "Trebuchet MS"
+            console_bg = "#031016"
+            console_text = "#00FFFF"
+            font_family = "Consolas"
         elif theme_name == "El Caleuche":
-            console_bg = "#050f0f"
-            console_text = "#64ffda"
+            console_bg = "#08060D"
+            console_text = "#D400FF"
             font_family = "Courier New"
         else:
             console_bg = "#1a1a1a"
-            console_text = "#e0e0e0"
-            font_family = "Inter"
+            console_text = "#00ff41"
+            font_family = "Consolas"
 
         self.console.configure(fg_color=console_bg, text_color=console_text, font=ctk.CTkFont(family=font_family, size=12))
 

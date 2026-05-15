@@ -1,8 +1,8 @@
 @echo off
-title Lanzador Proyecto Merge — Etiquetas
+title Generador de Etiquetas DWDM
 echo.
 echo ============================================================
-echo   ⚡ PROYECTO MERGE: ETIQUETAS DWDM ⚡
+echo   ⚡ GENERADOR DE ETIQUETAS DWDM ⚡
 echo ============================================================
 echo.
 echo Verificando dependencias...
